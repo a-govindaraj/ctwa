@@ -1365,9 +1365,9 @@ function Admin({ settings, onConfig, onLogout }) {
                 </label>
               </div>
               <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
+                <table className="enrollment-overview-table" role="table">
+                  <thead role="rowgroup">
+                    <tr role="row">
                       <th>Member / Enrollment ID</th>
                       <th>Children</th>
                       <th>Approval</th>
@@ -1375,31 +1375,31 @@ function Admin({ settings, onConfig, onLogout }) {
                       <th></th>
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody role="rowgroup">
                     {visible.map((record) => {
                       const currentDue = balance(record.charges, today());
                       const paymentDue = record.approval === "approved" && currentDue > 0;
                       return (
-                      <tr key={record.id}>
-                        <td>
+                      <tr key={record.id} role="row">
+                        <td role="cell" data-label="Member / Enrollment ID">
                           <b>
                             {record.firstName} {record.surname}
                           </b>
                           <small className="enrollment-id">{record.id}</small>
                         </td>
-                        <td>{record.children.length}</td>
-                        <td>
+                        <td role="cell" data-label="Children">{record.children.length}</td>
+                        <td role="cell" data-label="Approval">
                           <span className={`badge ${record.approval}`}>
                             {record.approval}
                           </span>
                         </td>
-                        <td>
+                        <td role="cell" data-label="Due now">
                           <div className="due-cell">
                             {money(currentDue)}
                             {paymentDue && <span className="badge payment-due">Payment due</span>}
                           </div>
                         </td>
-                        <td>
+                        <td role="cell" className="enrollment-open-cell">
                           <button
                             title={`Open ${record.firstName}`}
                             aria-label={`Open ${record.firstName}`}

@@ -1039,6 +1039,60 @@ tr:last-child td {
   .admin-main .detail-actions {
     justify-content: flex-start;
   }
+  .enrollment-overview-table,
+  .enrollment-overview-table tbody {
+    display: block;
+  }
+  .enrollment-overview-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .enrollment-overview-table tbody tr {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px 10px;
+    padding: 16px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .enrollment-overview-table tbody tr:last-child {
+    border-bottom: 0;
+  }
+  .enrollment-overview-table td {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    overflow-wrap: anywhere;
+  }
+  .enrollment-overview-table td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 6px;
+    color: var(--muted);
+    font-size: 10px;
+  }
+  .enrollment-overview-table td:first-child {
+    grid-column: 1 / -1;
+    padding-right: 44px;
+  }
+  .enrollment-overview-table .enrollment-open-cell {
+    position: absolute;
+    top: 16px;
+    right: 12px;
+  }
+  .enrollment-overview-table .enrollment-open-cell::before {
+    display: none;
+  }
+  .enrollment-overview-table .badge {
+    max-width: 100%;
+    box-sizing: border-box;
+    white-space: normal;
+  }
   .page-heading.row > button {
     font-size: 11px;
     padding: 9px;
