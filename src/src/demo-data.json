@@ -1,0 +1,88 @@
+{
+  "settings": {
+    "year": "2026-27",
+    "start": "2026-09-01",
+    "end": "2027-08-31",
+    "feesConfigured": true,
+    "membershipFees": { "annual": 1000, "lifetime": 10000 },
+    "subjects": [
+      { "id": "subject-1", "name": "Tamil Language", "price": 6000, "frequency": "annually", "active": true },
+      { "id": "subject-2", "name": "Bharathanatiyam", "price": 2000, "frequency": "monthly", "active": true },
+      { "id": "subject-3", "name": "Vocal Music", "price": 2000, "frequency": "monthly", "active": true },
+      { "id": "subject-4", "name": "Keyboard", "price": 2000, "frequency": "monthly", "active": true },
+      { "id": "subject-5", "name": "Mirudangam", "price": 2000, "frequency": "weekly", "active": true },
+      { "id": "subject-6", "name": "Veena", "price": 2000, "frequency": "weekly", "active": true },
+      { "id": "subject-7", "name": "Violin", "price": 2000, "frequency": "weekly", "active": true },
+      { "id": "subject-8", "name": "Kuchipudi", "price": 2000, "frequency": "weekly", "active": true },
+      { "id": "subject-9", "name": "Key Stage 1", "price": 2000, "frequency": "weekly", "active": true },
+      { "id": "subject-10", "name": "Key Stage 2", "price": 2000, "frequency": "weekly", "active": true },
+      { "id": "subject-11", "name": "Key Stage 3", "price": 2000, "frequency": "weekly", "active": true }
+    ]
+  },
+  "enrollments": [
+    {
+      "id": "CTWA-DEMO-001",
+      "approval": "pending",
+      "firstName": "Sample Family 1",
+      "surname": "Example",
+      "address": "Fictional address",
+      "postcode": "CV1 1AA",
+      "email": "family1@example.com",
+      "mobile": "07000000000",
+      "membership": "annual",
+      "consent": true,
+      "children": [
+        { "name": "Sample Child 1", "dob": "2016-02-12", "class": "", "index": "", "subjects": ["subject-1"] }
+      ]
+    },
+    {
+      "id": "CTWA-DEMO-002",
+      "approval": "approved",
+      "firstName": "Sample Family 2",
+      "surname": "Example",
+      "address": "Fictional address",
+      "postcode": "CV1 1AA",
+      "email": "family2@example.com",
+      "mobile": "07000000000",
+      "membership": "annual",
+      "consent": true,
+      "children": [
+        { "name": "Sample Child 2", "dob": "2016-02-12", "class": "", "index": "", "subjects": ["subject-1"] }
+      ]
+    },
+    {
+      "id": "CTWA-DEMO-003",
+      "approval": "pending",
+      "firstName": "Sample Family 3",
+      "surname": "Example",
+      "address": "Fictional address",
+      "postcode": "CV1 1AA",
+      "email": "family3@example.com",
+      "mobile": "07000000000",
+      "membership": "annual",
+      "consent": true,
+      "children": [
+        { "name": "Sample Child 3", "dob": "2016-02-12", "class": "", "index": "", "subjects": ["subject-1"] }
+      ]
+    },
+    {
+      "id": "CTWA-DEMO-004",
+      "approval": "approved",
+      "firstName": "Sample Three-child Family",
+      "surname": "Example",
+      "address": "Fictional demo address",
+      "postcode": "CV1 1AA",
+      "email": "three-children@example.com",
+      "mobile": "07000000000",
+      "membership": "annual",
+      "consent": true,
+      "children": [
+        { "name": "Sample Child A", "dob": "2017-04-15", "class": "Year 4", "index": "DEMO-A", "subjects": ["subject-1", "subject-4"] },
+        { "name": "Sample Child B", "dob": "2015-07-20", "class": "Year 6", "index": "DEMO-B", "subjects": ["subject-2", "subject-3"] },
+        { "name": "Sample Child C", "dob": "2013-01-10", "class": "Year 8", "index": "DEMO-C", "subjects": ["subject-5", "subject-7"] }
+      ]
+    }
+  ],
+  "members": [],
+  "payments": []
+}
