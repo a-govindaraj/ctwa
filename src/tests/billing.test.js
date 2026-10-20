@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { buildAnnualReport, annualReportCsv, auditReportCsv, createYearSnapshot } from "../src/reports.js";
+import { hydrateEnrollment, reverseReceipt, matchReceipt, reviewTarget, saveReview, reviewStatus } from "../src/controls.js";
 import {
   schedule,
   buildCharges,
@@ -188,6 +190,138 @@ test("withdrawal stops future unpaid fees but retains earlier fees and payment h
   assert.equal(record.children[0].subjects.length, 1);
   assert.equal(edited.changes[0].before.children[0].subjects[0], "tamil");
   assert.throws(() => allocatePayment(edited.charges, 2001));
+});
+
+test("partial subject withdrawal preserves other subjects, siblings and earlier payments", () => {
+  const config = { ...settings, subjects: [...settings.subjects, { id: "music", name: "Music", frequency: "monthly", price: 500, active: true }] };
+  const record = editableRecord();
+  record.children[0].subjects.push("music");
+  record.children.push({ ...structuredClone(input.children[0]), name: "Sibling", class: "", index: "" });
+  record.charges = allocatePayment(buildCharges(record, config, "2026-10-10"), 1500).charges;
+  const payload = editPayload(record);
+  payload.children[0].subjects = ["music"];
+  const updated = reviseEnrollment(record, payload, config, "2026-11-10");
+  const cancelled = updated.charges.filter(charge => charge.cancelledAmount > 0);
+  assert.equal(cancelled.length, 9);
+  assert.ok(cancelled.every(charge => charge.childIndex === 0 && charge.subjectId === "tamil" && charge.due >= payload.effective));
+  assert.deepEqual(updated.charges.filter(charge => !cancelled.some(item => item.id === charge.id)), record.charges.filter(charge => !cancelled.some(item => item.id === charge.id)));
+  assert.equal(balance(record.charges) - balance(updated.charges), 18000);
+  assert.equal(updated.charges.find(charge => charge.id === "0-tamil-0").paid, 500);
+  assert.deepEqual(updated.children[0].subjects, ["music"]);
+  assert.deepEqual(updated.children[1], record.children[1]);
+  assert.equal(updated.changes[0].reason, payload.reason);
+  assert.deepEqual(record.children[0].subjects, ["tamil", "music"]);
+});
+
+test("annual reports reconcile full-year fees, receipts, waivers and current dues", () => {
+  const record = editableRecord();
+  const payment = allocatePayment(record.charges, 3500);
+  record.charges = payment.charges;
+  const payload = editPayload(record); payload.children[0].subjects = [];
+  const stopped = reviseEnrollment(record, payload, settings, "2026-11-10");
+  const receipt = { number: "R-1", enrollmentId: record.id, amount: 3500, allocations: payment.allocations, date: "2026-10-10", name: "Test Family", method: "cash", recordedBy: "admin@example.com" };
+  const report = buildAnnualReport([stopped, { ...editableRecord(), id: "pending", approval: "pending" }, { ...editableRecord(), id: "old", year: "2025-26" }], [receipt, { ...receipt, enrollmentId: "old" }], settings.year, "2026-11-10");
+  assert.equal(report.approved, 1);
+  assert.equal(report.pending, 1);
+  assert.equal(report.students, 1);
+  assert.equal(report.rows.length, 2);
+  assert.equal(report.receipts.length, 1);
+  assert.deepEqual(report.totals, { charged: 23000, paid: 3500, waived: 18000, outstanding: 1500, dueNow: 1500 });
+  assert.equal(report.reconciled, true);
+  assert.equal(report.charges.filter(charge => charge.cancelledAmount).length, 9);
+  assert.equal(report.changes[0].reason, payload.reason);
+  const earlier = buildAnnualReport([record], [receipt], settings.year, "2026-10-10");
+  assert.equal(earlier.totals.dueNow, 0);
+  assert.equal(earlier.totals.outstanding, 19500);
+  assert.deepEqual(buildAnnualReport([], [], settings.year, "2026-10-10").rows, []);
+  assert.equal(buildAnnualReport([record], [], settings.year, "2026-10-10").reconciled, false);
+  assert.equal(buildAnnualReport([record], [{ ...receipt, amount: 3600 }], settings.year, "2026-10-10").allocationDifference, 100);
+  const wrongAllocation = { ...receipt, allocations: [{ id: "missing", amount: 3500 }] };
+  assert.equal(buildAnnualReport([record], [wrongAllocation], settings.year, "2026-10-10").reconciled, false);
+  const legacy = { ...record, charges: record.charges.map(({ childIndex, subjectId, ...charge }) => { void childIndex; void subjectId; return charge; }) };
+  assert.deepEqual(buildAnnualReport([legacy], [receipt], settings.year, "2026-10-10").rows, earlier.rows);
+});
+
+test("report exports quote names, protect formulas and include audit evidence", () => {
+  const record = editableRecord(); record.firstName = '=HYPERLINK("bad")'; record.children[0].name = "Child, One\nSecond line";
+  const payload = editPayload(record); payload.children[0].subjects = [];
+  const stopped = reviseEnrollment(record, payload, settings, "2026-11-10");
+  stopped.changes[0].actor = "admin@example.com";
+  const report = buildAnnualReport([stopped], [], settings.year, "2026-11-10");
+  const summary = annualReportCsv(report);
+  assert.ok(summary.includes(`"'=HYPERLINK(""bad"") Family"`));
+  assert.ok(summary.includes('"Child, One\nSecond line"'));
+  assert.ok(summary.includes('"230.00","0.00","180.00","50.00","50.00"'));
+  const audit = auditReportCsv(report);
+  assert.ok(audit.includes('"Charge"'));
+  assert.ok(audit.includes(payload.reason));
+  assert.ok(audit.includes("admin@example.com"));
+  assert.ok(audit.includes('"Revision 1"'));
+});
+
+test("receipt reversals retain originals, reopen balances and cannot be applied twice", () => {
+  const record = editableRecord();
+  const paid = allocatePayment(record.charges, 1500);
+  const receipt = { number: "R-1", enrollmentId: record.id, date: "2026-10-10", amount: 1500, allocations: paid.allocations };
+  const payload = { revision: 0, reason: "Wrong amount", requestId: "reverse-request-1" };
+  const reversed = reverseReceipt(receipt, payload, "Admin", "2026-10-19T10:00:00Z");
+  assert.deepEqual(reversed.allocations, receipt.allocations);
+  assert.equal(receipt.reversal, undefined);
+  assert.equal(balance(hydrateEnrollment(record, [reversed]).charges), balance(record.charges));
+  assert.equal(balance(hydrateEnrollment(record, [receipt]).charges), balance(record.charges) - 1500);
+  assert.deepEqual(reverseReceipt(reversed, payload, "Admin", "later"), reversed);
+  assert.throws(() => reverseReceipt(reversed, { ...payload, requestId: "another-request-1" }, "Admin", "later"), /already/);
+  assert.throws(() => reverseReceipt(receipt, { ...payload, reason: "" }, "Admin", "later"), /reason/);
+});
+
+test("reports and printable receipts distinguish reversals from active collections", () => {
+  const record = editableRecord();
+  const allocated = allocatePayment(record.charges, 1500);
+  const receipt = { number: "R-1", enrollmentId: record.id, date: "2026-10-10", name: "Test Family", amount: 1500, method: "cash", allocations: allocated.allocations };
+  const reversed = reverseReceipt(receipt, { revision: 0, reason: "Wrong <amount>", requestId: "reverse-request-1" }, "Admin", "2026-10-19T10:00:00Z");
+  const report = buildAnnualReport([hydrateEnrollment(record, [reversed])], [reversed], settings.year, "2026-10-19");
+  assert.equal(report.collected, 0);
+  assert.equal(report.reversed, 1500);
+  assert.equal(report.unmatched, 0);
+  assert.equal(report.reconciled, true);
+  assert.ok(auditReportCsv(report).includes("Reversed allocation (excluded)"));
+  const html = receiptHtml(reversed);
+  assert.ok(html.includes("REVERSED / Original receipt"));
+  assert.ok(html.includes("Wrong &lt;amount&gt;"));
+  assert.ok(!html.includes("Total paid:"));
+  const snapshot = createYearSnapshot(report, { requestId: "snapshot-request-1", label: "Reviewed copy" }, "Admin", "now", "S-1");
+  report.totals.charged = 1;
+  assert.equal(snapshot.report.totals.charged, 23000);
+  assert.throws(() => createYearSnapshot({ ...report, reconciled: false }, { requestId: "snapshot-request-1", label: "Copy" }, "Admin", "now", "S-2"), /differences/);
+});
+
+test("matching requires settlement evidence, stale checks and an unmatch before reversal", () => {
+  const receipt = { date: "2026-10-10" };
+  const payload = { revision: 0, status: "matched", reference: "Bank page 3", date: "2026-10-11", reason: "Matched to deposit" };
+  const matched = matchReceipt(receipt, payload, "Admin", "2026-10-19", "2026-10-19");
+  assert.equal(matched.matchingHistory[0].reference, "Bank page 3");
+  assert.throws(() => matchReceipt(receipt, { ...payload, date: "2026-10-20" }, "Admin", "now", "2026-10-19"), /settlement date/);
+  assert.throws(() => matchReceipt(receipt, { ...payload, reference: "" }, "Admin", "now", "2026-10-19"), /reference/);
+  assert.throws(() => matchReceipt(matched, payload, "Admin", "now", "2026-10-19"), /changed/);
+  assert.throws(() => reverseReceipt(matched, { revision: 1, reason: "Wrong amount", requestId: "reverse-request-1" }, "Admin", "now"), /Remove/);
+  const unmatched = matchReceipt(matched, { revision: 1, status: "unmatched", reason: "Wrong deposit" }, "Admin", "now", "2026-10-19");
+  assert.equal(unmatched.matchingHistory.length, 2);
+  assert.ok(reverseReceipt(unmatched, { revision: 2, reason: "Wrong amount", requestId: "reverse-request-1" }, "Admin", "now").reversal);
+});
+
+test("audit reviews retain query history and require rechecking changed financial records", () => {
+  const record = editableRecord();
+  const payload = { id: record.id, kind: "charge", targetId: record.charges[1].id, revision: 0, status: "query", note: "Confirm waiver" };
+  const target = reviewTarget([record], [], payload);
+  payload.fingerprint = target.fingerprint;
+  const queried = saveReview(null, target, payload, "Admin", "now");
+  const resolved = saveReview(queried, target, { ...payload, revision: 1, status: "resolved", note: "Evidence checked" }, "Admin", "later");
+  assert.equal(resolved.history.length, 2);
+  assert.equal(reviewStatus(resolved, target), "Resolved");
+  record.charges[1].paid = 100;
+  assert.equal(reviewStatus(resolved, reviewTarget([record], [], payload)), "Needs recheck");
+  assert.throws(() => saveReview(null, target, { ...payload, fingerprint: "old" }, "Admin", "now"), /changed/);
+  assert.throws(() => saveReview(null, target, { ...payload, status: "resolved" }, "Admin", "now"), /open query/);
 });
 
 test("prepayment is retained and only the unpaid remainder is cancelled", () => {

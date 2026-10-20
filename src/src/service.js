@@ -9,6 +9,8 @@ import {
   reschedulePendingEnrollment,
 } from "./billing.js";
 import demoData from "./demo-data.json";
+import { hydrateEnrollment, reverseReceipt, matchReceipt, reviewTarget, saveReview, assertReversalAllowed } from "./controls.js";
+import { buildAnnualReport, createYearSnapshot } from "./reports.js";
 
 export const demo = import.meta.env.VITE_DEMO !== "false";
 export const today = () =>
@@ -17,7 +19,7 @@ let credential = "";
 export const setCredential = (value) => {
   credential = value;
 };
-const state = demo ? { settings: structuredClone(demoData.settings), enrollments: [], receipts: [], members: structuredClone(demoData.members) } : null;
+const state = demo ? { settings: structuredClone(demoData.settings), enrollments: [], receipts: [], members: structuredClone(demoData.members), reviews: [], snapshots: [] } : null;
 const id = (prefix) =>
   `${prefix}-${crypto.randomUUID().slice(0, 12).toUpperCase()}`;
 
@@ -76,7 +78,29 @@ if (demo) {
 
 async function demoRequest(action, payload) {
   if (action === "config") return structuredClone(state.settings);
-  if (action === "dashboard") return structuredClone(state);
+  if (action === "dashboard") {
+    const data = { enrollments: state.enrollments, receipts: state.receipts, reviews: state.reviews, snapshots: state.snapshots.map(({ id, year, label, savedAt, savedBy }) => ({ id, year, label, savedAt, savedBy })) };
+    return structuredClone(data);
+  }
+  if (action === "getSnapshot") {
+    const snapshot = state.snapshots.find(item => item.id === payload.snapshotId);
+    if (!snapshot) throw new Error("Snapshot not found.");
+    return structuredClone(snapshot);
+  }
+  if (action === "saveSnapshot") {
+    const existing = state.snapshots.find(item => item.requestId === payload.requestId);
+    if (existing) return { message: "Snapshot already saved.", id: existing.id };
+    const snapshot = createYearSnapshot(buildAnnualReport(state.enrollments, state.receipts, payload.year, today(), state.reviews), payload, "Demo admin", new Date().toISOString(), id("SNAPSHOT"));
+    state.snapshots.push(snapshot);
+    return { message: "Fixed snapshot saved (demo only; reload resets it).", id: snapshot.id };
+  }
+  if (action === "saveAuditReview") {
+    const target = reviewTarget(state.enrollments, state.receipts, payload);
+    const index = state.reviews.findIndex(item => item.id === target.key);
+    const review = saveReview(state.reviews[index], target, payload, "Demo admin", new Date().toISOString());
+    if (index < 0) state.reviews.push(review); else state.reviews[index] = review;
+    return { message: "Audit review saved." };
+  }
   if (action === "remindAll") {
     const candidates = state.enrollments.filter(item => item.year === payload.year && item.approval === "approved" && balance(item.charges, today()) > 0);
     let sent = 0; let skipped = 0;
@@ -90,6 +114,15 @@ async function demoRequest(action, payload) {
   }
   const record = state.enrollments.find((item) => item.id === payload.id);
   if (!record) throw new Error("Enrollment not found.");
+  if (["reversePayment", "matchPayment"].includes(action)) {
+    const index = state.receipts.findIndex(item => item.number === payload.number && item.enrollmentId === record.id);
+    if (index < 0) throw new Error("Receipt not found.");
+    const receipt = state.receipts[index];
+    if (action === "reversePayment") assertReversalAllowed(receipt, record, state.enrollments);
+    state.receipts[index] = action === "reversePayment" ? reverseReceipt(receipt, payload, "Demo admin", new Date().toISOString()) : matchReceipt(receipt, payload, "Demo admin", new Date().toISOString(), today());
+    record.charges = hydrateEnrollment(record, state.receipts).charges;
+    return { message: action === "reversePayment" ? "Payment reversed; original receipt kept and fees reopened. No refund was made." : "Bank/cash matching updated." };
+  }
   if (action === "editEnrollment") {
     Object.assign(record, reviseEnrollment(record, payload, state.settings, today()));
     record.changes[record.changes.length - 1].actor = "Demo admin";
@@ -103,7 +136,7 @@ async function demoRequest(action, payload) {
     if (
       state.members.some(
         (member) => member.email === record.email && member.lifetime,
-      )
+      ) || state.enrollments.some(item => item.id !== record.id && item.email === record.email && item.approval === "approved" && item.membership === "lifetime" && item.charges[0].paid === item.charges[0].amount)
     ) {
       record.charges[0].amount = 0;
       record.charges[0].description = "Previously paid lifetime membership";
@@ -145,15 +178,10 @@ async function demoRequest(action, payload) {
       reference: payload.reference,
       allocations: result.allocations,
       emailStatus: "demo",
+      recordedBy: "Demo admin",
     };
     record.charges = result.charges;
     state.receipts.push(receipt);
-    if (
-      record.membership === "lifetime" &&
-      record.charges[0].paid === record.charges[0].amount &&
-      !state.members.some((member) => member.email === record.email)
-    )
-      state.members.push({ email: record.email, lifetime: true });
     return structuredClone(receipt);
   }
   if (action === "remind") {

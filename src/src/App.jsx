@@ -21,6 +21,9 @@ import {
 } from "lucide-react";
 import { api, demo, setCredential, today } from "./service.js";
 import SecurityCheck from "./SecurityCheck.jsx";
+import AnnualReport from "./AnnualReport.jsx";
+import { ReceiptControlDialog } from "./AuditControls.jsx";
+import { activeReceipts, currentMatching } from "./controls.js";
 import { Printer } from "lucide-react";
 import { RotateCcw } from "lucide-react";
 import { Pencil } from "lucide-react";
@@ -802,6 +805,7 @@ function ReceiptView({ receipt, onClose }) {
             Close
           </button>
         </div>
+        {receipt.reversal && <p className="alert error">Reversed payment / {receipt.reversal.reason}<br />{receipt.reversal.actor} / {receipt.reversal.savedAt}. Original payment below; excluded from collections.</p>}
         <iframe ref={printFrame} className="receipt-preview" title="Printable receipt" sandbox="allow-same-origin allow-modals" onLoad={() => setPrintReady(true)} srcDoc={receiptHtml(receipt)} />
         <p className="muted">
           Email:{" "}
@@ -895,9 +899,11 @@ function EnrollmentDetail({
   const [reference, setReference] = useState("");
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [stoppingStudent, setStoppingStudent] = useState(false);
   const [checkingPreviousMembership, setCheckingPreviousMembership] = useState(false);
   const [previousPaymentReference, setPreviousPaymentReference] = useState("");
   const [membershipError, setMembershipError] = useState("");
+  const [waiveError, setWaiveError] = useState("");
   const [enrollmentDate, setEnrollmentDate] = useState(record.enrollmentDate || today());
   async function verifyPreviousMembership() {
     if (busy || !previousPaymentReference.trim()) return;
@@ -910,6 +916,7 @@ function EnrollmentDetail({
   }
   const requestId = useRef(crypto.randomUUID());
   const due = balance(record.charges, today());
+  const hasActiveStudentSubjects = record.children.some(child => child.subjects.length > 0);
   const paymentAmount = amount === "" ? (due / 100).toFixed(2) : amount;
   async function action(name, payload = {}) {
     setBusy(true);
@@ -922,6 +929,27 @@ function EnrollmentDetail({
       } else notify(result.message || "Enrollment approved.");
     } catch (failure) {
       notify(failure.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function stopStudentFromMonth({ childIndex, subjectIds, effective, reason }) {
+    if (busy) return;
+    setBusy(true);
+    setWaiveError("");
+    try {
+      const details = Object.fromEntries(["firstName", "surname", "address", "postcode", "mobile", "telephone"].map(field => [field, record[field] || ""]));
+      const children = record.children.map(child => ({ name: child.name, dob: child.dob, class: child.class || "", index: child.index || "", subjects: [...child.subjects] }));
+      if (!children[childIndex] || children[childIndex].subjects.length === 0) throw new Error("Choose a student with at least one active subject.");
+      if (!Array.isArray(subjectIds) || !subjectIds.length || subjectIds.some(id => !children[childIndex].subjects.includes(id))) throw new Error("Choose at least one active subject to stop.");
+      children[childIndex].subjects = children[childIndex].subjects.filter(id => !subjectIds.includes(id));
+      const result = await api("editEnrollment", { id: record.id, revision: record.revision || 0, details, children, effective, reason });
+      await onRefresh();
+      setAmount("");
+      setStoppingStudent(false);
+      notify(result.message);
+    } catch (failure) {
+      setWaiveError(failure.message);
     } finally {
       setBusy(false);
     }
@@ -988,8 +1016,9 @@ function EnrollmentDetail({
                 >
                   <FileText size={16} />
                   {receipt.number} <b>{money(receipt.amount)}</b>
+                  {receipt.reversal && <span className="badge">Reversed</span>}
                 </button>
-                {receipt.emailStatus === "failed" && (
+                {receipt.emailStatus === "failed" && !receipt.reversal && (
                   <button
                     className="secondary"
                     disabled={busy}
@@ -1058,6 +1087,21 @@ function EnrollmentDetail({
             </button>
           </form>
           <button
+            className="secondary waiver-action"
+            disabled={busy || record.approval !== "approved" || !hasActiveStudentSubjects}
+            onClick={() => {
+              setWaiveError("");
+              setStoppingStudent(true);
+            }}
+          >
+            <RotateCcw size={16} />
+            Stop subjects / waive fees
+          </button>
+          <p className="small muted">
+            Waives unpaid fees from the effective date for selected subjects.
+            Paid amounts and past receipts are unchanged.
+          </p>
+          <button
             className="text-button"
             disabled={busy || record.approval !== "approved" || due <= 0}
             onClick={() => action("remind")}
@@ -1075,12 +1119,45 @@ function EnrollmentDetail({
       <FeeSchedule charges={record.charges} />
       {record.changes?.length > 0 && <section className="change-history"><h2>Change history</h2>{record.changes.map(change => <p key={change.revision}><b>Revision {change.revision}</b> / Effective {dateLabel(change.effective)}<br />{change.reason}<small>{change.actor || "Admin"}{change.savedAt ? ` / ${change.savedAt.slice(0, 10)}` : ""}</small></p>)}</section>}
       </>}
+      {stoppingStudent && <StopStudentDialog record={record} settings={settings} busy={busy} error={waiveError} onCancel={() => setStoppingStudent(false)} onConfirm={stopStudentFromMonth} />}
       {checkingPreviousMembership && <ConfirmationDialog title="Verify previously paid lifetime membership" description="Confirm that the charity's old records show this member has already paid lifetime membership." Icon={ShieldCheck} busy={busy} error={membershipError} confirmLabel="Verify membership" confirmDisabled={!previousPaymentReference.trim()} onCancel={() => setCheckingPreviousMembership(false)} onConfirm={verifyPreviousMembership}>
         <p className="reminder-dialog-note">No new membership fee will be due. No money will be refunded. Subject fees and existing receipts will stay unchanged.</p>
         <Field label="Previous receipt or paper-record reference" required maxLength={300} value={previousPaymentReference} disabled={busy} onChange={event => setPreviousPaymentReference(event.target.value)} />
       </ConfirmationDialog>}
     </>
   );
+}
+
+function StopStudentDialog({ record, settings, busy, error, onCancel, onConfirm }) {
+  const initialChild = record.children.findIndex(child => child.subjects.length > 0);
+  const [childIndex, setChildIndex] = useState(initialChild >= 0 ? String(initialChild) : "");
+  const [subjectIds, setSubjectIds] = useState([]);
+  const [effective, setEffective] = useState(today());
+  const [reason, setReason] = useState("");
+  const selected = Number.isInteger(Number(childIndex)) && childIndex !== "" ? record.children[Number(childIndex)] : null;
+  const childHasSubjects = !!selected && selected.subjects.length > 0;
+  return <ConfirmationDialog title="Stop subjects / waive fees" description={selected?.name || record.id} Icon={RotateCcw} busy={busy} error={error} confirmLabel="Apply waiver" confirmDisabled={!childHasSubjects || !subjectIds.length || !reason.trim() || !effective || effective < today() || !!record.academicEnd && effective > record.academicEnd} onCancel={onCancel} onConfirm={() => onConfirm({ childIndex: Number(childIndex), subjectIds, effective, reason: reason.trim() })}>
+    <div className="waiver-dialog-summary">
+      <Field label="Student">
+        <select value={childIndex} disabled={busy} onChange={event => { setChildIndex(event.target.value); setSubjectIds([]); }}>
+          <option value="" disabled>Select student</option>
+          {record.children.map((child, index) => <option key={`${child.name}-${index}`} value={String(index)} disabled={!child.subjects.length}>{child.name} {child.subjects.length === 0 ? "(no active subjects)" : ""}</option>)}
+        </select>
+      </Field>
+      {childHasSubjects && <fieldset className="subjects"><legend>Subjects to stop</legend>
+        <label className={subjectIds.length === selected.subjects.length ? "selected" : ""}><input type="checkbox" disabled={busy} checked={subjectIds.length === selected.subjects.length} onChange={event => setSubjectIds(event.target.checked ? [...selected.subjects] : [])} /><span>All subjects</span></label>
+        {selected.subjects.map(id => {
+          const subject = settings.subjects.find(item => item.id === id);
+          const charge = record.charges.find(item => item.subjectId !== undefined ? item.childIndex === Number(childIndex) && item.subjectId === id : item.id.startsWith(`${childIndex}-${id}-`) && /^\d+$/.test(item.id.slice(`${childIndex}-${id}-`.length)));
+          const name = subject?.name || charge?.description.split(" / ").slice(1).join(" / ") || id;
+          return <label key={id} className={subjectIds.includes(id) ? "selected" : ""}><input type="checkbox" disabled={busy} checked={subjectIds.includes(id)} onChange={event => setSubjectIds(current => event.target.checked ? [...current, id] : current.filter(subjectId => subjectId !== id))} /><span>{name}</span></label>;
+        })}
+      </fieldset>}
+      <Field label="Effective from" type="date" required min={today()} max={record.academicEnd} value={effective} disabled={busy} onChange={event => setEffective(event.target.value)} />
+      <Field label="Reason for waiver"><textarea required rows={2} maxLength={300} value={reason} disabled={busy} onChange={event => setReason(event.target.value)} /></Field>
+    </div>
+    <p className="reminder-dialog-note">Only unpaid fees for checked subjects due on or after the effective date are waived. Other subjects, membership, paid amounts and past receipts stay unchanged.</p>
+  </ConfirmationDialog>;
 }
 
 function ConfirmationDialog({ title, description, children, Icon = Mail, busy, error, confirmLabel, confirmDisabled = false, onCancel, onConfirm }) {
@@ -1121,6 +1198,7 @@ function Admin({ settings, onConfig, onLogout }) {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(null);
   const [receipt, setReceipt] = useState(null);
+  const [receiptControl, setReceiptControl] = useState(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [reminding, setReminding] = useState(false);
@@ -1181,6 +1259,7 @@ function Admin({ settings, onConfig, onLogout }) {
           ["enroll", Plus, "New enrollment"],
           ["fees", Settings, "Subjects & fees"],
           ["transactions", FileText, "Transactions"],
+          ["reports", ShieldCheck, "Annual report & audit"],
         ].map(([value, Icon, label]) => (
           <button
             key={value}
@@ -1225,13 +1304,14 @@ function Admin({ settings, onConfig, onLogout }) {
             onSaved={refresh}
           />
         )}
+        {data && tab === "reports" && <AnnualReport key={year} enrollments={data.enrollments} receipts={data.receipts} reviews={data.reviews || []} snapshots={data.snapshots || []} onRefresh={refresh} notify={setNotice} year={year} years={availableYears} onYear={setYear} onReceipt={setReceipt} onEnrollment={id => { setSelected(id); setTab("dashboard"); }} />}
         {data && tab === "transactions" && (
           <>
             <div className="page-heading row between">
               <div><p className="eyebrow">PAYMENT RECORDS</p><h1>Transactions</h1></div>
               <select className="year-select" aria-label="Transaction academic year" value={year} onChange={event => setYear(event.target.value)}>{availableYears.map(value => <option key={value}>{value}</option>)}</select>
             </div>
-            <div className="transaction-summary"><div><span>Collected in {year}</span><strong>{money(transactions.reduce((total, item) => total + item.amount, 0))}</strong></div><div><span>Recorded payments</span><strong>{transactions.length}</strong></div></div>
+            <div className="transaction-summary"><div><span>Collected in {year} (excluding reversals)</span><strong>{money(activeReceipts(transactions).reduce((total, item) => total + item.amount, 0))}</strong></div><div><span>Active payments</span><strong>{activeReceipts(transactions).length}</strong></div></div>
             <div className="table-wrap">
               <table className="transactions-table">
                 <thead>
@@ -1243,6 +1323,8 @@ function Admin({ settings, onConfig, onLogout }) {
                     <th>Reference</th>
                     <th>Amount received</th>
                     <th>Email</th>
+                    <th>Bank/cash status</th>
+                    <th>Controls</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1262,6 +1344,8 @@ function Admin({ settings, onConfig, onLogout }) {
                       <td>{item.reference || "-"}</td>
                       <td>{money(item.amount)}</td>
                       <td>{item.emailStatus}</td>
+                      <td>{item.reversal ? "Reversed" : currentMatching(item)?.status === "matched" ? "Matched" : "Unmatched"}</td>
+                      <td>{!item.reversal && <button type="button" className="text-button" onClick={() => setReceiptControl(item)}><ShieldCheck size={16} />Manage receipt</button>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1321,7 +1405,7 @@ function Admin({ settings, onConfig, onLogout }) {
                   <span>Collected</span>
                   <strong>
                     {money(
-                      data.receipts.filter(receipt => records.some(record => record.id === receipt.enrollmentId)).reduce(
+                      activeReceipts(data.receipts).filter(receipt => records.some(record => record.id === receipt.enrollmentId)).reduce(
                         (total, item) => total + item.amount,
                         0,
                       ),
@@ -1424,6 +1508,7 @@ function Admin({ settings, onConfig, onLogout }) {
       {receipt && (
         <ReceiptView receipt={receipt} onClose={() => setReceipt(null)} />
       )}
+      {receiptControl && <ReceiptControlDialog receipt={receiptControl} onCancel={() => setReceiptControl(null)} onSaved={async message => { await refresh(); setReceiptControl(null); setNotice(message); }} />}
       {reminderConfirmation && <PaymentReminderDialog confirmation={reminderConfirmation} busy={reminding} error={reminderError} onCancel={() => setReminderConfirmation(null)} onConfirm={remindAll} />}
     </div>
   );

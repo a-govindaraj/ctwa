@@ -332,7 +332,7 @@ header{text-align:center;border-bottom:1px dashed #555;padding-bottom:10px}h1{fo
 .details{margin:10px 0}.details b{font-weight:bold}.items{width:100%;table-layout:fixed;border-collapse:collapse;margin:12px 0}.items th,.items td{text-align:left;vertical-align:top;padding:6px 0;border-bottom:1px dashed #bbb}.items th:last-child,.items td:last-child{text-align:right;width:21mm;white-space:nowrap}.items td:first-child{padding-right:5px}.items small{display:block;color:#444;margin-top:3px}thead{display:table-header-group}tr{break-inside:avoid;page-break-inside:avoid}
 .total{border-top:1px dashed #555;border-bottom:1px dashed #555;padding:10px 0;font-size:14px;font-weight:bold;text-align:right;break-inside:avoid}footer{margin-top:12px;text-align:center;font-size:9px;break-inside:avoid}
 @media print{html,body{width:72mm;background:#fff}.receipt{width:72mm;margin:0;padding:0}}
-</style></head><body><article class="receipt"><header><h1>Coventry Tamil Welfare Association</h1><small>Registered Charity Number: 1093924</small><h2>Payment receipt</h2></header><section class="details"><p><b>Receipt:</b> ${escape(receipt.number)}</p><p><b>Date:</b> ${escape(receipt.date)}</p><p><b>Received from:</b> ${escape(receipt.name)}</p><p><b>Enrollment:</b> ${escape(receipt.enrollmentId)}</p><p><b>Method:</b> ${escape(receipt.method)}</p><p><b>Reference:</b> ${escape(receipt.reference || "-")}</p></section><table class="items"><thead><tr><th>Payment for</th><th>Amount</th></tr></thead><tbody>${receipt.allocations.map((item) => `<tr><td>${escape(item.description)}<small>Period: ${escape(item.due)}</small></td><td>${money(item.amount)}</td></tr>`).join("")}</tbody></table><p class="total">Total paid: ${money(receipt.amount)}</p><footer><p>Thank you for your payment.</p><p>coventrytamils2002@gmail.com<br>tamils.org.uk</p></footer></article></body></html>`;
+</style></head><body><article class="receipt"><header><h1>Coventry Tamil Welfare Association</h1><small>Registered Charity Number: 1093924</small><h2>${receipt.reversal ? "REVERSED / Original receipt" : "Payment receipt"}</h2></header>${receipt.reversal ? `<section class="details"><p><b>Reversed:</b> ${escape(receipt.reversal.savedAt)}</p><p><b>By:</b> ${escape(receipt.reversal.actor)}</p><p><b>Reason:</b> ${escape(receipt.reversal.reason)}</p><p>Excluded from collections. No refund was made by this reversal.</p></section>` : ""}<section class="details"><p><b>Receipt:</b> ${escape(receipt.number)}</p><p><b>Date:</b> ${escape(receipt.date)}</p><p><b>Received from:</b> ${escape(receipt.name)}</p><p><b>Enrollment:</b> ${escape(receipt.enrollmentId)}</p><p><b>Method:</b> ${escape(receipt.method)}</p><p><b>Reference:</b> ${escape(receipt.reference || "-")}</p></section><table class="items"><thead><tr><th>Payment for</th><th>Amount</th></tr></thead><tbody>${receipt.allocations.map((item) => `<tr><td>${escape(item.description)}<small>Period: ${escape(item.due)}</small></td><td>${money(item.amount)}</td></tr>`).join("")}</tbody></table><p class="total">${receipt.reversal ? "Original payment" : "Total paid"}: ${money(receipt.amount)}</p><footer><p>${receipt.reversal ? "Reversed record; not a current payment confirmation." : "Thank you for your payment."}</p><p>coventrytamils2002@gmail.com<br>tamils.org.uk</p></footer></article></body></html>`;
   }
 
   // src/defaults.js
@@ -363,13 +363,217 @@ header{text-align:center;border-bottom:1px dashed #555;padding-bottom:10px}h1{fo
     }))
   };
 
+  // src/controls.js
+  var reviewStatuses = ["checked", "query", "resolved"];
+  var currentMatching = (receipt) => receipt.matchingHistory?.at(-1) || null;
+  var activeReceipts = (receipts) => receipts.filter((receipt) => !receipt.reversal);
+  function assertReversalAllowed(receipt, record, enrollments) {
+    if (receipt.allocations.some((item) => item.id === "membership") && record.membership === "lifetime" && enrollments.some((item) => item.id !== record.id && item.email === record.email && item.approval === "approved" && item.charges.find((charge) => charge.id === "membership")?.amount === 0)) {
+      throw new Error("Lifetime membership has been carried forward to another enrollment. Resolve that membership record before reversing this payment.");
+    }
+  }
+  function hydrateEnrollment(record, receipts) {
+    const charges = record.charges.map((charge) => ({ ...charge, paid: 0 }));
+    for (const receipt of activeReceipts(receipts).filter((item) => item.enrollmentId === record.id)) {
+      for (const allocation of receipt.allocations) {
+        const charge = charges.find((item) => item.id === allocation.id);
+        if (!charge) throw new Error("A payment allocation is missing its charge. Contact the system administrator.");
+        charge.paid += allocation.amount;
+      }
+    }
+    return { ...record, charges };
+  }
+  function note(value, label, maximum = 500) {
+    if (typeof value !== "string" || !value.trim() || value.length > maximum) throw new Error(`Enter ${label}, up to ${maximum} characters.`);
+    return value.trim();
+  }
+  function currentRevision(record, payload) {
+    if ((record.controlRevision || 0) !== payload.revision) throw new Error("This record has changed. Refresh before saving.");
+  }
+  function reverseReceipt(receipt, payload, actor, timestamp) {
+    if (receipt.reversal) {
+      if (receipt.reversal.requestId === payload.requestId) return receipt;
+      throw new Error("This receipt has already been reversed.");
+    }
+    currentRevision(receipt, payload);
+    if (typeof payload.requestId !== "string" || !/^[a-zA-Z0-9-]{8,100}$/.test(payload.requestId)) throw new Error("Invalid correction reference.");
+    if (currentMatching(receipt)?.status === "matched") throw new Error("Remove the bank/cash match with a reason before reversing this receipt.");
+    return { ...receipt, controlRevision: (receipt.controlRevision || 0) + 1, reversal: { reason: note(payload.reason, "a reversal reason"), actor, savedAt: timestamp, requestId: payload.requestId } };
+  }
+  function matchReceipt(receipt, payload, actor, timestamp, today) {
+    currentRevision(receipt, payload);
+    if (receipt.reversal) throw new Error("Reversed receipts cannot be matched.");
+    if (!["matched", "unmatched"].includes(payload.status)) throw new Error("Choose a valid matching status.");
+    if (currentMatching(receipt)?.status === payload.status || payload.status === "unmatched" && !currentMatching(receipt)) throw new Error("The receipt already has this matching status.");
+    const reason = note(payload.reason, "a matching note or correction reason");
+    const entry = { status: payload.status, reason, actor, savedAt: timestamp };
+    if (payload.status === "matched") {
+      entry.reference = note(payload.reference, "a bank statement or cash-deposit reference", 300);
+      dateOnly(payload.date);
+      if (payload.date < receipt.date || payload.date > today) throw new Error("Choose a settlement date between the payment date and today.");
+      entry.date = payload.date;
+    }
+    return { ...receipt, controlRevision: (receipt.controlRevision || 0) + 1, matchingHistory: [...receipt.matchingHistory || [], entry] };
+  }
+  function reviewTarget(enrollments, receipts, payload) {
+    const record = enrollments.find((item) => item.id === payload.id);
+    if (!record) throw new Error("Enrollment not found.");
+    let target;
+    if (payload.kind === "receipt") {
+      const receipt = receipts.find((item) => item.number === payload.targetId && item.enrollmentId === record.id);
+      if (!receipt) throw new Error("Receipt not found.");
+      target = { number: receipt.number, amount: receipt.amount, allocations: receipt.allocations, reversal: receipt.reversal || null, matchingHistory: receipt.matchingHistory || [] };
+    } else if (payload.kind === "charge") {
+      const charge = record.charges.find((item) => item.id === payload.targetId);
+      if (!charge) throw new Error("Charge not found.");
+      target = charge;
+    } else if (payload.kind === "enrollment" && payload.targetId === record.id) {
+      target = { revision: record.revision || 0, approval: record.approval, charges: record.charges };
+    } else throw new Error("Choose a receipt, charge or enrollment to review.");
+    return { key: JSON.stringify([record.id, payload.kind, payload.targetId]), year: record.year, fingerprint: JSON.stringify(target) };
+  }
+  function saveReview(previous, target, payload, actor, timestamp) {
+    if ((previous?.revision || 0) !== payload.revision) throw new Error("This review has changed. Refresh before saving.");
+    if (payload.fingerprint !== target.fingerprint) throw new Error("The financial record has changed. Reopen it before reviewing.");
+    if (!reviewStatuses.includes(payload.status)) throw new Error("Choose a valid review status.");
+    if (payload.status === "resolved" && previous?.status !== "query") throw new Error("Only an open query can be resolved.");
+    const entry = { status: payload.status, note: note(payload.note, "review notes"), actor, savedAt: timestamp, fingerprint: target.fingerprint };
+    return { id: target.key, enrollmentId: payload.id, kind: payload.kind, targetId: payload.targetId, year: target.year, revision: (previous?.revision || 0) + 1, ...entry, history: [...previous?.history || [], entry] };
+  }
+  function reviewStatus(review, target) {
+    if (!review) return "Not reviewed";
+    if (review.fingerprint !== target.fingerprint) return "Needs recheck";
+    return { checked: "Checked", query: "Query raised", resolved: "Resolved" }[review.status];
+  }
+
+  // src/reports.js
+  var emptyTotals = () => ({ charged: 0, paid: 0, waived: 0, outstanding: 0, dueNow: 0 });
+  function buildAnnualReport(enrollments, receipts, year, date, reviews = []) {
+    const records = enrollments.filter((record) => record.year === year);
+    const approved = records.filter((record) => record.approval === "approved");
+    const ids = new Set(approved.map((record) => record.id));
+    const allPayments = receipts.filter((receipt) => ids.has(receipt.enrollmentId));
+    const payments = activeReceipts(allPayments);
+    const rows = [];
+    const charges = [];
+    const changes = [];
+    for (const record of approved) {
+      const member = `${record.firstName} ${record.surname}`;
+      const groups = /* @__PURE__ */ new Map();
+      for (const charge of record.charges) {
+        const membership = charge.id === "membership";
+        const childIndex = membership ? null : charge.childIndex ?? Number(charge.id.split("-")[0]);
+        const subjectId = membership ? "membership" : charge.subjectId ?? charge.id.slice(`${childIndex}-`.length).replace(/-(?:revision-\d+-)?\d+$/, "");
+        const key = JSON.stringify([childIndex, subjectId]);
+        const student = membership ? "Membership" : record.children[childIndex]?.name || "Student";
+        const subject = membership ? charge.description : charge.description.split(" / ").slice(1).join(" / ") || subjectId;
+        if (!groups.has(key)) groups.set(key, { enrollmentId: record.id, member, student, subject, ...emptyTotals() });
+        const row = groups.get(key);
+        const waived = charge.cancelledAmount || 0;
+        const outstanding = charge.amount - charge.paid - waived;
+        row.charged += charge.amount;
+        row.paid += charge.paid;
+        row.waived += waived;
+        row.outstanding += outstanding;
+        if (charge.due <= date) row.dueNow += outstanding;
+        charges.push({ ...charge, enrollmentId: record.id, member, student, subject, outstanding });
+      }
+      rows.push(...groups.values());
+      const children = (items) => items.map((child) => ({ name: child.name, subjects: child.subjects }));
+      changes.push(...(record.changes || []).map((change) => ({ revision: change.revision, effective: change.effective, reason: change.reason, actor: change.actor, savedAt: change.savedAt, before: { children: children(change.before?.children || []) }, after: { children: children(change.after?.children || []) }, enrollmentId: record.id, member })));
+    }
+    const totals = emptyTotals();
+    for (const row of rows) for (const field of Object.keys(totals)) totals[field] += row[field];
+    const collected = payments.reduce((total, receipt) => total + receipt.amount, 0);
+    const allocationDifference = payments.reduce((total, receipt) => total + Math.abs(receipt.amount - receipt.allocations.reduce((sum, allocation) => sum + allocation.amount, 0)), 0);
+    const ledger = /* @__PURE__ */ new Map();
+    for (const receipt of payments) for (const allocation of receipt.allocations) {
+      const key = JSON.stringify([receipt.enrollmentId, allocation.id]);
+      ledger.set(key, (ledger.get(key) || 0) + allocation.amount);
+    }
+    let ledgerDifference = 0;
+    for (const charge of charges) {
+      const key = JSON.stringify([charge.enrollmentId, charge.id]);
+      ledgerDifference += Math.abs(charge.paid - (ledger.get(key) || 0));
+      ledger.delete(key);
+    }
+    for (const amount of ledger.values()) ledgerDifference += Math.abs(amount);
+    return {
+      year,
+      date,
+      approved: approved.length,
+      pending: records.filter((record) => record.approval === "pending").length,
+      students: approved.reduce((total, record) => total + record.children.length, 0),
+      rows,
+      charges,
+      changes,
+      receipts: allPayments.map(({ email, requestId, ...receipt }) => {
+        void email;
+        void requestId;
+        return receipt;
+      }),
+      reviews: reviews.filter((review) => ids.has(review.enrollmentId)).map((review) => ({ ...review, displayStatus: reviewStatus(review, reviewTarget(enrollments, receipts, { id: review.enrollmentId, kind: review.kind, targetId: review.targetId })) })),
+      totals,
+      collected,
+      allocationDifference,
+      ledgerDifference,
+      matched: payments.filter((receipt) => currentMatching(receipt)?.status === "matched").reduce((sum, receipt) => sum + receipt.amount, 0),
+      unmatched: payments.filter((receipt) => currentMatching(receipt)?.status !== "matched").reduce((sum, receipt) => sum + receipt.amount, 0),
+      reversed: allPayments.filter((receipt) => receipt.reversal).reduce((sum, receipt) => sum + receipt.amount, 0),
+      reconciled: totals.paid === collected && allocationDifference === 0 && ledgerDifference === 0
+    };
+  }
+  function csv(rows) {
+    const cell = (value) => {
+      const text = String(value ?? "");
+      const safe = /^\s*[=+\-@]|^[\t\r\n]/.test(text) ? `'${text}` : text;
+      return `"${safe.replace(/"/g, '""')}"`;
+    };
+    return rows.map((row) => Array.from({ length: rows[0].length }, (_, index) => cell(row[index])).join(",")).join("\r\n");
+  }
+  var pounds = (amount) => (amount / 100).toFixed(2);
+  function annualReportCsv(report) {
+    const amounts = (row) => [row.charged, row.paid, row.waived, row.outstanding, row.dueNow].map(pounds);
+    return csv([
+      ["Academic year", "Snapshot date", "Enrollment", "Member", "Student", "Subject", "Scheduled fees GBP", "Collected GBP", "Waived GBP", "Outstanding full year GBP", "Due now GBP"],
+      ...report.rows.map((row) => [report.year, report.date, row.enrollmentId, row.member, row.student, row.subject, ...amounts(row)]),
+      [report.year, report.date, "TOTAL", "", "", "", ...amounts(report.totals)]
+    ]);
+  }
+  function auditReportCsv(report) {
+    return csv([
+      ["Type", "Academic year", "Snapshot date", "Enrollment", "Member", "Record ID", "Description", "Due / payment date", "Charge GBP", "Paid / allocation GBP", "Waived GBP", "Outstanding GBP", "Effective date", "Reason", "Actor", "Recorded at", "Payment method", "Reference", "Subjects before (IDs)", "Subjects after (IDs)"],
+      ...report.charges.map((charge) => ["Charge", report.year, report.date, charge.enrollmentId, charge.member, charge.id, charge.description, charge.due, pounds(charge.amount), pounds(charge.paid), pounds(charge.cancelledAmount || 0), pounds(charge.outstanding), charge.cancelledFrom, charge.cancellationReason]),
+      ...report.receipts.flatMap((receipt) => [
+        [receipt.reversal ? "Reversed receipt (excluded)" : "Receipt", report.year, report.date, receipt.enrollmentId, receipt.name, receipt.number, "Original payment", receipt.date, "", pounds(receipt.amount), "", "", "", "", receipt.recordedBy, "", receipt.method, receipt.reference],
+        ...receipt.allocations.map((allocation) => [receipt.reversal ? "Reversed allocation (excluded)" : "Allocation", report.year, report.date, receipt.enrollmentId, receipt.name, receipt.number, `${allocation.id}: ${allocation.description}`, allocation.due, "", pounds(allocation.amount), "", "", "", "", receipt.recordedBy, "", receipt.method, receipt.reference]),
+        ...receipt.reversal ? [["Reversal", report.year, report.date, receipt.enrollmentId, receipt.name, receipt.number, "Payment correction; no refund", receipt.reversal.savedAt?.slice(0, 10), "", pounds(-receipt.amount), "", "", "", receipt.reversal.reason, receipt.reversal.actor, receipt.reversal.savedAt]] : [],
+        ...(receipt.matchingHistory || []).map((entry) => ["Bank/cash match", report.year, report.date, receipt.enrollmentId, receipt.name, receipt.number, entry.status, entry.date, "", "", "", "", "", entry.reason, entry.actor, entry.savedAt, receipt.method, entry.reference])
+      ]),
+      ...report.changes.map((change) => ["Change", report.year, report.date, change.enrollmentId, change.member, `Revision ${change.revision}`, "Enrollment revision", "", "", "", "", "", change.effective, change.reason, change.actor, change.savedAt, "", "", JSON.stringify((change.before?.children || []).map((child) => ({ name: child.name, subjects: child.subjects }))), JSON.stringify((change.after?.children || []).map((child) => ({ name: child.name, subjects: child.subjects })))]),
+      ...(report.reviews || []).flatMap((review) => [
+        ["Current review status", report.year, report.date, review.enrollmentId, "", review.targetId, `${review.kind}: ${review.displayStatus}`, "", "", "", "", "", "", review.note, review.actor, review.savedAt],
+        ...review.history.map((entry) => ["Audit review history", report.year, report.date, review.enrollmentId, "", review.targetId, `${review.kind}: ${entry.status}`, "", "", "", "", "", "", entry.note, entry.actor, entry.savedAt])
+      ])
+    ]);
+  }
+  function createYearSnapshot(report, payload, actor, timestamp, id) {
+    if (!/^\d{4}-\d{2}$/.test(report.year || "")) throw new Error("Choose an academic year.");
+    if (typeof payload.requestId !== "string" || !/^[a-zA-Z0-9-]{8,100}$/.test(payload.requestId)) throw new Error("Invalid snapshot reference.");
+    if (typeof payload.label !== "string" || !payload.label.trim() || payload.label.length > 120) throw new Error("Enter a snapshot label, up to 120 characters.");
+    if (!report.approved) throw new Error("There are no approved enrollments to snapshot.");
+    if (!report.reconciled) throw new Error("Resolve receipt allocation differences before saving a snapshot.");
+    return { id, year: report.year, label: payload.label.trim(), requestId: payload.requestId, savedBy: actor, savedAt: timestamp, report: JSON.parse(JSON.stringify(report)), summaryCsv: annualReportCsv(report), auditCsv: auditReportCsv(report) };
+  }
+
   // backend/apps-script.js
   var properties = () => PropertiesService.getScriptProperties();
   var now = () => Utilities.formatDate(/* @__PURE__ */ new Date(), "Europe/London", "yyyy-MM-dd");
   var uid = (prefix) => `${prefix}-${Utilities.getUuid().replace(/-/g, "").slice(0, 16).toUpperCase()}`;
   var book = () => SpreadsheetApp.openById(properties().getProperty("SPREADSHEET_ID"));
-  function table(name) {
+  function table(name, optional = false) {
     const sheet = book().getSheetByName(name);
+    if (!sheet && optional) return { all: () => [] };
     if (!sheet) throw new Error("Run setup before using the live application.");
     return {
       all() {
@@ -442,20 +646,7 @@ header{text-align:center;border-bottom:1px dashed #555;padding-bottom:10px}h1{fo
       );
     return claims.email.toLowerCase();
   }
-  function hydrated(record, receipts) {
-    const charges = record.charges.map((charge) => ({ ...charge, paid: 0 }));
-    receipts.filter((receipt) => receipt.enrollmentId === record.id).forEach(
-      (receipt) => receipt.allocations.forEach((allocation) => {
-        const charge = charges.find((item) => item.id === allocation.id);
-        if (!charge)
-          throw new Error(
-            "A payment allocation is missing its charge. Contact the system administrator."
-          );
-        charge.paid += allocation.amount;
-      })
-    );
-    return { ...record, charges };
-  }
+  var hydrated = hydrateEnrollment;
   function hasLifetime(email, enrollments, receipts) {
     return table("Members").all().some((member) => member.email === email && member.lifetime) || enrollments.some((record) => {
       const member = hydrated(record, receipts);
@@ -573,11 +764,37 @@ Coventry Tamil Welfare Association`,
       audit(action, actor, `${payload.year}: ${JSON.stringify(result)}`);
       return { ...result, message: `Payment reminders for ${payload.year}: ${result.sent} sent, ${result.skipped} already reminded today, ${result.failed} failed, ${result.deferred} deferred. Deferred or failed reminders can be retried; the daily scheduler also checks unpaid members.` };
     }
-    if (action === "dashboard")
-      return {
+    if (action === "dashboard") {
+      const data = {
         enrollments: enrollments.map((record2) => hydrated(record2, receipts)),
-        receipts
+        receipts,
+        reviews: table("AuditReviews", true).all(),
+        snapshots: table("YearSnapshots", true).all().map(({ id, year, label, savedAt, savedBy }) => ({ id, year, label, savedAt, savedBy }))
       };
+      return data;
+    }
+    if (action === "getSnapshot") {
+      const snapshot = table("YearSnapshots", true).all().find((item) => item.id === payload.snapshotId);
+      if (!snapshot) throw new Error("Snapshot not found.");
+      return snapshot;
+    }
+    if (action === "saveSnapshot") {
+      const existing = table("YearSnapshots", true).all().find((item) => item.requestId === payload.requestId);
+      if (existing) return { message: "Snapshot already saved.", id: existing.id };
+      const report = buildAnnualReport(enrollments.map((record2) => hydrated(record2, receipts)), receipts, payload.year, now(), table("AuditReviews", true).all());
+      const snapshot = createYearSnapshot(report, payload, actor, (/* @__PURE__ */ new Date()).toISOString(), uid("SNAPSHOT"));
+      table("YearSnapshots").save(snapshot.id, snapshot);
+      audit(action, actor, snapshot.id);
+      return { message: "Fixed report snapshot saved. Future financial changes will not alter it.", id: snapshot.id };
+    }
+    if (action === "saveAuditReview") {
+      const target = reviewTarget(enrollments.map((record2) => hydrated(record2, receipts)), receipts, payload);
+      const previous = table("AuditReviews", true).all().find((item) => item.id === target.key);
+      const review = saveReview(previous, target, payload, actor, (/* @__PURE__ */ new Date()).toISOString());
+      table("AuditReviews").save(review.id, review);
+      audit(action, actor, review.id);
+      return { message: "Audit review saved." };
+    }
     if (action === "settings") {
       const value = prepareSettings(payload.settings, settings(), (/* @__PURE__ */ new Date()).toISOString());
       table("Settings").save("settings", value);
@@ -649,6 +866,15 @@ Coventry Tamil Welfare Association`,
     const original = enrollments.find((record2) => record2.id === payload.id);
     if (!original) throw new Error("Enrollment not found.");
     const record = hydrated(original, receipts);
+    if (["reversePayment", "matchPayment"].includes(action)) {
+      const receipt = receipts.find((item) => item.number === payload.number && item.enrollmentId === record.id);
+      if (!receipt) throw new Error("Receipt not found.");
+      if (action === "reversePayment") assertReversalAllowed(receipt, record, enrollments);
+      const updated = action === "reversePayment" ? reverseReceipt(receipt, payload, actor, (/* @__PURE__ */ new Date()).toISOString()) : matchReceipt(receipt, payload, actor, (/* @__PURE__ */ new Date()).toISOString(), now());
+      table("Receipts").save(receipt.number, updated);
+      audit(action, actor, receipt.number);
+      return { message: action === "reversePayment" ? "Payment reversed. The original receipt is retained and its fees are unpaid again. No money was refunded. Record a replacement payment if needed." : "Bank/cash matching updated." };
+    }
     if (action === "editEnrollment") {
       const updated = reviseEnrollment(record, payload, settings(), now());
       updated.changes[updated.changes.length - 1].actor = actor;
@@ -744,6 +970,7 @@ Coventry Tamil Welfare Association`,
       if (!receipt) throw new Error("Receipt not found.");
       if (receipt.emailStatus === "sent")
         return { message: "Receipt email has already been sent." };
+      if (receipt.reversal) throw new Error("Reversed receipt emails cannot be retried.");
       receiptEmail(receipt);
       return {
         message: receipt.emailStatus === "sent" ? "Receipt email sent." : "Email could not be sent. Please retry later."
@@ -781,7 +1008,9 @@ Coventry Tamil Welfare Association`,
       "Enrollments",
       "Members",
       "Receipts",
-      "Audit"
+      "Audit",
+      "AuditReviews",
+      "YearSnapshots"
     ]) {
       if (!spreadsheet.getSheetByName(name)) {
         const sheet = spreadsheet.insertSheet(name);
@@ -807,7 +1036,7 @@ Coventry Tamil Welfare Association`,
     try {
       const receipts = table("Receipts").all();
       for (const receipt of receipts.filter(
-        (item) => item.emailStatus !== "sent"
+        (item) => item.emailStatus !== "sent" && !item.reversal
       )) {
         if (MailApp.getRemainingDailyQuota() < 1) break;
         receiptEmail(receipt);

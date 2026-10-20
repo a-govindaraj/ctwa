@@ -511,11 +511,15 @@ main {
 .admin-nav button {
   width: 100%;
   justify-content: start;
+  text-align: left;
   font-size: 12px;
   background: transparent;
   color: var(--muted);
   margin-bottom: 8px;
   padding: 12px;
+}
+.admin-nav button svg {
+  flex-shrink: 0;
 }
 .admin-nav button.active {
   background: #e5f0e8;
@@ -526,6 +530,37 @@ main {
 }
 .admin-main {
   min-width: 0;
+}
+.report-counts, .report-totals { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 18px; margin: 0 0 24px; padding: 18px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.report-counts dt, .report-totals dt { font-size: 12px; color: var(--muted); }
+.report-counts dd, .report-totals dd { margin: 8px 0 0; font-family: "Manrope", sans-serif; font-size: 22px; font-weight: 700; overflow-wrap: anywhere; }
+.report-actions, .report-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 24px 0; }
+.report-actions button { font-size: 12px; }
+.snapshot-selector { max-width: 520px; }
+.snapshot-selector select { min-width: 0; width: 100%; }
+.control-fields { border: 0; margin: 0; padding: 0; min-width: 0; }
+.control-dialog form > h2 { overflow-wrap: anywhere; }
+.control-history { margin-top: 18px; font-size: 12px; overflow-wrap: anywhere; }
+.control-history summary { cursor: pointer; padding: 8px 0; }
+.control-history small { display: block; margin-top: 6px; color: var(--muted); }
+.report-toolbar .tabs { flex-wrap: wrap; }
+.report-toolbar .search { min-width: 0; max-width: 100%; }
+.report-year { min-width: 150px; }
+.report-view-title { font-size: 18px; }
+.report-table { min-width: 1000px; }
+.report-table th, .report-table td { padding: 12px; vertical-align: top; }
+.report-table td { max-width: 260px; overflow-wrap: anywhere; }
+.report-table .text-button { font-size: 12px; text-align: left; flex-wrap: wrap; }
+.report-table small { display: block; width: 100%; margin-top: 5px; color: var(--muted); }
+@media print {
+  body:has(.annual-report) .site-header, body:has(.annual-report) .demo-banner, body:has(.annual-report) footer, body:has(.annual-report) .admin-nav, body:has(.annual-report) .report-actions, body:has(.annual-report) .report-toolbar, body:has(.annual-report) .report-year { display: none !important; }
+  body:has(.annual-report) main { max-width: none; margin: 0; padding: 0; background: white; }
+  body:has(.annual-report) .admin-layout { display: block; }
+  .annual-report .table-wrap { overflow: visible; }
+  .annual-report .report-table { min-width: 0; width: 100%; table-layout: fixed; }
+  .annual-report .report-table th, .annual-report .report-table td, .annual-report .report-table .text-button { padding: 4px; font-size: 9px; white-space: normal; overflow-wrap: anywhere; }
+  .annual-report tr { break-inside: avoid; }
+  .annual-report thead { display: table-header-group; }
 }
 .stats {
   display: grid;
@@ -761,6 +796,11 @@ tr:last-child td {
   width: 100%;
   font-size: 12px;
 }
+.waiver-action {
+  width: 100%;
+  margin-top: 12px;
+  font-size: 12px;
+}
 .payment-panel .text-button {
   font-size: 12px;
   margin-top: 12px;
@@ -823,6 +863,11 @@ tr:last-child td {
 .reminder-dialog-summary dt { color: var(--muted); }
 .reminder-dialog-summary dd { margin: 0; font-weight: 700; white-space: nowrap; }
 .reminder-dialog .reminder-dialog-note { font-size: 12px; color: var(--muted); }
+.waiver-dialog-summary {
+  margin: 18px 0;
+  display: grid;
+  gap: 10px;
+}
 .reminder-dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
 .reminder-dialog-actions button { min-height: 44px; font-size: 13px; }
 @media (max-width: 480px) {

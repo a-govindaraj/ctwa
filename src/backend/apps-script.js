@@ -10,6 +10,8 @@ import {
   money,
 } from "../src/billing.js";
 import { defaultSettings } from "../src/defaults.js";
+import { hydrateEnrollment, reverseReceipt, matchReceipt, reviewTarget, saveReview, assertReversalAllowed } from "../src/controls.js";
+import { buildAnnualReport, createYearSnapshot } from "../src/reports.js";
 
 const properties = () => PropertiesService.getScriptProperties();
 const now = () =>
@@ -19,8 +21,9 @@ const uid = (prefix) =>
 const book = () =>
   SpreadsheetApp.openById(properties().getProperty("SPREADSHEET_ID"));
 
-function table(name) {
+function table(name, optional = false) {
   const sheet = book().getSheetByName(name);
+  if (!sheet && optional) return { all: () => [] };
   if (!sheet) throw new Error("Run setup before using the live application.");
   return {
     all() {
@@ -121,22 +124,7 @@ export function verifyAdmin(credential) {
   return claims.email.toLowerCase();
 }
 
-function hydrated(record, receipts) {
-  const charges = record.charges.map((charge) => ({ ...charge, paid: 0 }));
-  receipts
-    .filter((receipt) => receipt.enrollmentId === record.id)
-    .forEach((receipt) =>
-      receipt.allocations.forEach((allocation) => {
-        const charge = charges.find((item) => item.id === allocation.id);
-        if (!charge)
-          throw new Error(
-            "A payment allocation is missing its charge. Contact the system administrator.",
-          );
-        charge.paid += allocation.amount;
-      }),
-    );
-  return { ...record, charges };
-}
+const hydrated = hydrateEnrollment;
 
 function hasLifetime(email, enrollments, receipts) {
   return (
@@ -247,8 +235,7 @@ function savePhotos(input, id) {
 export function dispatch(request) {
   const { action, payload = {}, credential } = request;
   if (action === "config") return settings();
-  const actor =
-    action === "enroll" && !credential ? "public" : verifyAdmin(credential);
+  const actor = action === "enroll" && !credential ? "public" : verifyAdmin(credential);
   const enrollments = table("Enrollments").all();
   const receipts = table("Receipts").all();
   if (action === "remindAll") {
@@ -265,11 +252,37 @@ export function dispatch(request) {
     audit(action, actor, `${payload.year}: ${JSON.stringify(result)}`);
     return { ...result, message: `Payment reminders for ${payload.year}: ${result.sent} sent, ${result.skipped} already reminded today, ${result.failed} failed, ${result.deferred} deferred. Deferred or failed reminders can be retried; the daily scheduler also checks unpaid members.` };
   }
-  if (action === "dashboard")
-    return {
+  if (action === "dashboard") {
+    const data = {
       enrollments: enrollments.map((record) => hydrated(record, receipts)),
       receipts,
+      reviews: table("AuditReviews", true).all(),
+      snapshots: table("YearSnapshots", true).all().map(({ id, year, label, savedAt, savedBy }) => ({ id, year, label, savedAt, savedBy })),
     };
+    return data;
+  }
+  if (action === "getSnapshot") {
+    const snapshot = table("YearSnapshots", true).all().find(item => item.id === payload.snapshotId);
+    if (!snapshot) throw new Error("Snapshot not found.");
+    return snapshot;
+  }
+  if (action === "saveSnapshot") {
+    const existing = table("YearSnapshots", true).all().find(item => item.requestId === payload.requestId);
+    if (existing) return { message: "Snapshot already saved.", id: existing.id };
+    const report = buildAnnualReport(enrollments.map(record => hydrated(record, receipts)), receipts, payload.year, now(), table("AuditReviews", true).all());
+    const snapshot = createYearSnapshot(report, payload, actor, new Date().toISOString(), uid("SNAPSHOT"));
+    table("YearSnapshots").save(snapshot.id, snapshot);
+    audit(action, actor, snapshot.id);
+    return { message: "Fixed report snapshot saved. Future financial changes will not alter it.", id: snapshot.id };
+  }
+  if (action === "saveAuditReview") {
+    const target = reviewTarget(enrollments.map(record => hydrated(record, receipts)), receipts, payload);
+    const previous = table("AuditReviews", true).all().find(item => item.id === target.key);
+    const review = saveReview(previous, target, payload, actor, new Date().toISOString());
+    table("AuditReviews").save(review.id, review);
+    audit(action, actor, review.id);
+    return { message: "Audit review saved." };
+  }
   if (action === "settings") {
     const value = prepareSettings(payload.settings, settings(), new Date().toISOString());
     table("Settings").save("settings", value);
@@ -339,6 +352,17 @@ export function dispatch(request) {
   const original = enrollments.find((record) => record.id === payload.id);
   if (!original) throw new Error("Enrollment not found.");
   const record = hydrated(original, receipts);
+  if (["reversePayment", "matchPayment"].includes(action)) {
+    const receipt = receipts.find(item => item.number === payload.number && item.enrollmentId === record.id);
+    if (!receipt) throw new Error("Receipt not found.");
+    if (action === "reversePayment") assertReversalAllowed(receipt, record, enrollments);
+    const updated = action === "reversePayment"
+      ? reverseReceipt(receipt, payload, actor, new Date().toISOString())
+      : matchReceipt(receipt, payload, actor, new Date().toISOString(), now());
+    table("Receipts").save(receipt.number, updated);
+    audit(action, actor, receipt.number);
+    return { message: action === "reversePayment" ? "Payment reversed. The original receipt is retained and its fees are unpaid again. No money was refunded. Record a replacement payment if needed." : "Bank/cash matching updated." };
+  }
   if (action === "editEnrollment") {
     const updated = reviseEnrollment(record, payload, settings(), now());
     updated.changes[updated.changes.length - 1].actor = actor;
@@ -446,6 +470,7 @@ export function dispatch(request) {
     if (!receipt) throw new Error("Receipt not found.");
     if (receipt.emailStatus === "sent")
       return { message: "Receipt email has already been sent." };
+    if (receipt.reversal) throw new Error("Reversed receipt emails cannot be retried.");
     receiptEmail(receipt);
     return {
       message:
@@ -489,6 +514,8 @@ export function setup() {
     "Members",
     "Receipts",
     "Audit",
+    "AuditReviews",
+    "YearSnapshots",
   ]) {
     if (!spreadsheet.getSheetByName(name)) {
       const sheet = spreadsheet.insertSheet(name);
@@ -522,7 +549,7 @@ export function sendScheduledReminders() {
   try {
     const receipts = table("Receipts").all();
     for (const receipt of receipts.filter(
-      (item) => item.emailStatus !== "sent",
+      (item) => item.emailStatus !== "sent" && !item.reversal,
     )) {
       if (MailApp.getRemainingDailyQuota() < 1) break;
       receiptEmail(receipt);

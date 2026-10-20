@@ -32,6 +32,8 @@ function reset() {
     "Members",
     "Receipts",
     "Audit",
+    "AuditReviews",
+    "YearSnapshots",
   ]) {
     const rows = [["ID", "JSON"]];
     sheets.set(name, {
@@ -134,6 +136,78 @@ test("admin requests validate audience, verified email, expiry and allowlist", (
     claims = previous;
   }
 });
+test("only the admin allowlist grants access even when a legacy auditor setting exists", () => {
+  reset(); enroll();
+  properties.set("AUDITOR_EMAILS", "auditor@example.com");
+  claims.email = "auditor@example.com";
+  for (const action of ["dashboard", "getSnapshot", "payment", "reversePayment", "matchPayment", "saveAuditReview", "saveSnapshot", "settings", "enroll", "editEnrollment", "approve", "verifyLifetime", "retryReceipt", "remind", "remindAll"]) assert.throws(() => admin(action), /not authorised/);
+  assert.throws(() => verifyAdmin("token"), /not authorised/);
+  claims.email = "admin@example.com";
+  assert.equal(admin("dashboard").enrollments.length, 1);
+});
+
+test("financial controls persist, reverse once, retain evidence and freeze snapshots", () => {
+  reset(); const id = enroll(); admin("approve", { id });
+  const receipt = admin("payment", { id, amount: 1500, method: "cash", requestId: "control-payment-1" });
+  admin("matchPayment", { id, number: receipt.number, revision: 0, status: "matched", reference: "Deposit 123", date: testDate, reason: "Cash deposited" });
+  assert.equal(admin("dashboard").receipts[0].matchingHistory[0].actor, "admin@example.com");
+  assert.throws(() => admin("reversePayment", { id, number: receipt.number, revision: 1, requestId: "control-reverse-1", reason: "Wrong amount" }), /Remove/);
+  const snapshot = admin("saveSnapshot", { year: "2026-27", label: "Treasurer review", requestId: "snapshot-request-1", report: { totals: { paid: 1 } } });
+  assert.equal(admin("saveSnapshot", { year: "2026-27", label: "retry", requestId: "snapshot-request-1" }).id, snapshot.id);
+  const frozen = admin("getSnapshot", { snapshotId: snapshot.id });
+  assert.equal(frozen.report.collected, 1500);
+  assert.equal(frozen.report.matched, 1500);
+  admin("matchPayment", { id, number: receipt.number, revision: 1, status: "unmatched", reason: "Wrong deposit" });
+  const payload = { id, number: receipt.number, revision: 2, requestId: "control-reverse-1", reason: "Wrong amount" };
+  admin("reversePayment", payload); admin("reversePayment", payload);
+  assert.equal(admin("dashboard").enrollments[0].charges[0].paid, 0);
+  assert.equal(admin("dashboard").receipts[0].amount, 1500);
+  assert.deepEqual(admin("getSnapshot", { snapshotId: snapshot.id }), frozen);
+  admin("payment", { id, amount: 1000, method: "cash", requestId: "corrected-payment-1" });
+  assert.equal(admin("dashboard").enrollments[0].charges[0].paid, 1000);
+  properties.set("AUDITOR_EMAILS", "auditor@example.com"); claims.email = "auditor@example.com";
+  assert.throws(() => admin("getSnapshot", { snapshotId: snapshot.id }), /not authorised/);
+  assert.throws(() => admin("dashboard"), /not authorised/);
+});
+
+test("lifetime payment reversal removes entitlement and protects carried-forward membership", () => {
+  for (const carryForward of [false, true]) {
+    reset();
+    const first = dispatch({ action: "enroll", payload: { input: { ...input(), membership: "lifetime" }, requestId: "lifetime-reversal-enroll" } }).id;
+    admin("approve", { id: first });
+    const receipt = admin("payment", { id: first, amount: 10000, method: "cash", requestId: "lifetime-reversal-payment" });
+    const reversal = { id: first, number: receipt.number, revision: 0, reason: "Incorrect payment", requestId: "lifetime-reversal-control" };
+    if (!carryForward) admin("reversePayment", reversal);
+    const config = dispatch({ action: "config" });
+    admin("settings", { settings: { ...config, year: "2027-28", start: "2027-09-01", end: "2028-08-31" } });
+    testDate = "2027-09-01";
+    const second = dispatch({ action: "enroll", payload: { input: input(), requestId: "next-year-lifetime-check" } }).id;
+    admin("approve", { id: second });
+    const secondRecord = admin("dashboard").enrollments.find(record => record.id === second);
+    assert.equal(secondRecord.charges[0].amount, carryForward ? 0 : 1000);
+    if (carryForward) assert.throws(() => admin("reversePayment", reversal), /carried forward/);
+  }
+});
+
+test("existing installations can read reports before adding review and snapshot sheets", () => {
+  reset(); sheets.delete("AuditReviews"); sheets.delete("YearSnapshots");
+  const data = admin("dashboard");
+  assert.deepEqual(data.reviews, []);
+  assert.deepEqual(data.snapshots, []);
+  assert.throws(() => admin("getSnapshot", { snapshotId: "missing" }), /not found/);
+});
+
+test("audit queries persist independently of financial data and reject stale reviews", () => {
+  reset(); const id = enroll(); admin("approve", { id });
+  const record = admin("dashboard").enrollments[0];
+  const payload = { id, kind: "charge", targetId: record.charges[1].id, revision: 0, status: "query", note: "Check subject price", fingerprint: JSON.stringify(record.charges[1]) };
+  admin("saveAuditReview", payload);
+  assert.throws(() => admin("saveAuditReview", payload), /review has changed/);
+  admin("saveAuditReview", { ...payload, revision: 1, status: "resolved", note: "Price confirmed" });
+  assert.equal(admin("dashboard").reviews[0].history.length, 2);
+  assert.deepEqual(admin("dashboard").enrollments[0], record);
+});
+
 test("enrollment uses server prices, ignores client status and is idempotent", () => {
   reset();
   const value = { ...input(), charges: [{ amount: 1 }], approval: "approved" };

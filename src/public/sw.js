@@ -1,4 +1,4 @@
-const CACHE = 'ctwa-shell-v17';
+const CACHE = 'ctwa-shell-v20';
 const SHELL = ['/', '/logo.png', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)));
